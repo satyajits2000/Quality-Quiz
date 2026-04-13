@@ -296,7 +296,9 @@ const quizData = [
 let currentQuestion = 0, totalCorrect = 0;
 const chatHistory = document.getElementById('chat-history');
 const optionsDiv  = document.getElementById('chat-options');
-const totalQ      = quizData.length;
+const totalQ      = quizData.length; // total items including info cards
+const scorableQ   = quizData.filter(q => q.type === 'mcq' || q.type === 'matching').length; // real questions = 10
+let scorableIndex = 0; // display counter for "Question X / 10"
 let participantMeta = {};
 
 function startQuiz() {
@@ -315,6 +317,7 @@ function startQuiz() {
 
   if (window.firebaseRegister) window.firebaseRegister(participantMeta);
 
+  scorableIndex = 0; // reset display counter
   document.getElementById('reg-gate').style.display        = 'none';
   document.getElementById('chatbot-container').style.display = 'block';
   document.getElementById('participant-bar').textContent   = name;
@@ -353,28 +356,150 @@ function showQuestion() {
     return;
   }
 
-  // Handle matching questions
+  // Handle matching questions — interactive drag-and-match
   if (q.type === 'matching') {
-    addMessage(`<span class="question">Question ${currentQuestion+1}/${totalQ}: ${q.question}</span>`);
-    let matchHtml = '<table style="width:100%;border-collapse:collapse;font-size:0.9em;">';
-    q.pairs.forEach(([left, right]) => {
-      matchHtml += `<tr><td style="padding:5px 8px;border:1px solid #b0d8df;background:#e4f4f7;">${left}</td><td style="padding:5px 8px;border:1px solid #b0d8df;">→</td><td style="padding:5px 8px;border:1px solid #b0d8df;background:#e4f4f7;">${right}</td></tr>`;
+    scorableIndex++;
+    addMessage(`<span class="question">Question ${scorableIndex}/${scorableQ}: ${q.question}</span>`);
+    addMessage('👉 Click an ISO code on the left, then click its matching objective on the right to pair them.');
+
+    // Build shuffled copies
+    const lefts  = q.pairs.map(p => p[0]);
+    const rights = [...q.pairs.map(p => p[1])].sort(() => Math.random() - 0.5);
+    const userMap = {}; // ISO code → chosen objective
+    let selectedLeft = null;
+
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'display:flex;gap:10px;width:100%;margin-top:6px;';
+
+    const leftCol  = document.createElement('div');
+    leftCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:5px;';
+    const rightCol = document.createElement('div');
+    rightCol.style.cssText = 'flex:2;display:flex;flex-direction:column;gap:5px;';
+
+    function makeBtn(text, col) {
+      const b = document.createElement('button');
+      b.className = 'chat-button';
+      b.style.cssText = 'font-size:0.82rem;padding:7px 10px;text-align:left;white-space:normal;line-height:1.3;';
+      b.textContent = text;
+      b.dataset.val = text;
+      b.dataset.col = col;
+      return b;
+    }
+
+    function updateRightButtons() {
+      // Grey out already-used right options
+      const usedRights = Object.values(userMap);
+      Array.from(rightCol.children).forEach(b => {
+        if (usedRights.includes(b.dataset.val)) {
+          b.style.opacity = '0.4';
+          b.disabled = true;
+        } else {
+          b.style.opacity = '1';
+          b.disabled = false;
+        }
+      });
+    }
+
+    function refreshLeftLabels() {
+      Array.from(leftCol.children).forEach(b => {
+        if (b.dataset.col !== 'left') return;
+        const iso = b.dataset.val;
+        const matched = userMap[iso];
+        b.textContent = matched ? iso + ' ✓' : iso;
+        b.style.background = matched
+          ? 'linear-gradient(90deg,#2e7d32,#388e3c)'
+          : (selectedLeft === iso ? 'linear-gradient(90deg,#c8a96e,#b8945a)' : '');
+        b.style.backgroundImage = matched
+          ? 'linear-gradient(90deg,#2e7d32,#388e3c)'
+          : (selectedLeft === iso ? 'linear-gradient(90deg,#c8a96e,#b8945a)' : 'linear-gradient(90deg,var(--s-teal),var(--s-teal2))');
+      });
+    }
+
+    lefts.forEach(iso => {
+      const b = makeBtn(iso, 'left');
+      b.onclick = () => {
+        if (userMap[iso]) return; // already matched
+        selectedLeft = iso;
+        refreshLeftLabels();
+      };
+      leftCol.appendChild(b);
     });
-    matchHtml += '</table>';
-    addMessage(matchHtml);
-    if (q.feedback) addMessage("ℹ️ " + q.feedback);
-    if (q.citation) addMessage("📌 " + q.citation);
-    const nextBtn = document.createElement('button');
-    nextBtn.className = 'chat-button';
-    nextBtn.innerText = '▶ Next Question';
-    nextBtn.style.maxWidth = '200px';
-    nextBtn.onclick = () => { optionsDiv.innerHTML = ''; nextQuestion(); };
-    optionsDiv.appendChild(nextBtn);
+
+    rights.forEach(obj => {
+      const b = makeBtn(obj, 'right');
+      b.style.fontSize = '0.78rem';
+      b.onclick = () => {
+        if (!selectedLeft) {
+          addMessage('⬅️ Please select an ISO code on the left first!');
+          return;
+        }
+        userMap[selectedLeft] = obj;
+        selectedLeft = null;
+        refreshLeftLabels();
+        updateRightButtons();
+        // Auto-submit when all matched
+        if (Object.keys(userMap).length === lefts.length) {
+          submitMatchingBtn.style.display = 'block';
+        }
+      };
+      rightCol.appendChild(b);
+    });
+
+    wrapper.appendChild(leftCol);
+    wrapper.appendChild(rightCol);
+    optionsDiv.appendChild(wrapper);
+
+    const submitMatchingBtn = document.createElement('button');
+    submitMatchingBtn.className = 'chat-button';
+    submitMatchingBtn.style.cssText = 'max-width:220px;margin-top:8px;display:none;';
+    submitMatchingBtn.innerText = '✅ Submit Matches';
+    submitMatchingBtn.onclick = () => {
+      optionsDiv.innerHTML = '';
+      // Score: 1 point if ALL pairs correct (all-or-nothing for matching)
+      let correctCount = 0;
+      q.pairs.forEach(([iso, obj]) => { if (userMap[iso] === obj) correctCount++; });
+      const allCorrect = correctCount === q.pairs.length;
+      if (allCorrect) {
+        totalCorrect++;
+        addMessage('✅ Perfect! All ' + q.pairs.length + ' matches correct!');
+      } else {
+        addMessage('❌ ' + correctCount + ' / ' + q.pairs.length + ' correct. Here are the right answers:');
+      }
+      document.getElementById('score-bar').textContent = 'Score: ' + totalCorrect;
+      // Show participant answer vs correct answer table
+      let matchHtml = '<table style="width:100%;border-collapse:collapse;font-size:0.82em;">'
+        + '<tr style="background:#003e4a;color:#fff;">'
+        + '<th style="padding:5px 8px;border:1px solid #b0d8df;text-align:left;">ISO Code</th>'
+        + '<th style="padding:5px 8px;border:1px solid #b0d8df;text-align:left;">Your Answer</th>'
+        + '<th style="padding:5px 8px;border:1px solid #b0d8df;text-align:left;">Correct Answer</th>'
+        + '<th style="padding:5px 8px;border:1px solid #b0d8df;">✓</th>'
+        + '</tr>';
+      q.pairs.forEach(([iso, obj]) => {
+        const userAns = userMap[iso] || '—';
+        const ok = userAns === obj;
+        const rowBg = ok ? '#d4edda' : '#f8d7da';
+        matchHtml += '<tr style="background:' + rowBg + '">'
+          + '<td style="padding:5px 8px;border:1px solid #b0d8df;font-weight:700;">' + iso + '</td>'
+          + '<td style="padding:5px 8px;border:1px solid #b0d8df;' + (ok ? '' : 'color:#c0392b;') + '">' + userAns + '</td>'
+          + '<td style="padding:5px 8px;border:1px solid #b0d8df;font-weight:' + (ok ? 'normal' : '700') + ';">' + obj + '</td>'
+          + '<td style="padding:5px 8px;border:1px solid #b0d8df;text-align:center;">' + (ok ? '✅' : '❌') + '</td>'
+          + '</tr>';
+      });
+      matchHtml += '</table>';
+      addMessage(matchHtml);
+      if (q.citation) addMessage('📌 ' + q.citation);
+      const answers = [...(participantMeta.answers||[]), {q:currentQuestion, correct:allCorrect}];
+      participantMeta = { ...participantMeta, score:totalCorrect, progress:currentQuestion+1, answers };
+      if (window.firebaseUpdate) window.firebaseUpdate(participantMeta);
+      setTimeout(nextQuestion, 6000);
+    };
+    optionsDiv.appendChild(submitMatchingBtn);
     return;
   }
 
   // Standard MCQ
-  addMessage(`<span class="question">Question ${currentQuestion+1}/${totalQ}: ${q.question}</span>`);
+  scorableIndex++;
+  addMessage(`<span class="question">Question ${scorableIndex}/${scorableQ}: ${q.question}</span>`);
   q.options.forEach((opt, i) => {
     const btn = document.createElement('button');
     btn.className = 'chat-button';
@@ -406,7 +531,7 @@ function nextQuestion() {
   if (currentQuestion >= totalQ) {
     optionsDiv.innerHTML = '';
     addDivider();
-    addMessage(`<b>🎉 Quiz finished!</b> You answered <b>${totalCorrect}</b> questions correctly out of ${totalQ}.`);
+    addMessage(`<b>🎉 Quiz finished!</b> You answered <b>${totalCorrect}</b> out of ${scorableQ} questions correctly.`);
     participantMeta.status    = 'completed';
     participantMeta.endTime   = new Date().toISOString();
     participantMeta.finalScore = totalCorrect;
@@ -427,45 +552,78 @@ ctx.clearRect(0, 0, canvas.width, canvas.height);
 // --- Solid white background ---
 ctx.fillStyle = "#ffffff";
 ctx.fillRect(0, 0, canvas.width, canvas.height);
-// --- Teal header banner ---
-ctx.fillStyle = "#003e4a";
-ctx.fillRect(0, 0, canvas.width, 50);
-// --- Subtle teal stripe at bottom ---
-ctx.fillStyle = "#005a6e";
-ctx.fillRect(0, canvas.height - 30, canvas.width, 30);
-// --- Border ---
+// --- Outer border frame ---
 ctx.save();
 ctx.strokeStyle = "#003e4a";
-ctx.lineWidth = 6;
+ctx.lineWidth = 8;
 ctx.shadowColor = "rgba(0,62,74,0.25)";
-ctx.shadowBlur = 15;
-ctx.strokeRect(25, 25, canvas.width-50, canvas.height-50);
+ctx.shadowBlur = 12;
+ctx.strokeRect(18, 18, canvas.width - 36, canvas.height - 36);
 ctx.restore();
-// --- Header text (on teal banner) ---
-ctx.font = "bold 26px Inter, serif";
+// --- Inner thin border ---
+ctx.save();
+ctx.strokeStyle = "#c8a96e";
+ctx.lineWidth = 2;
+ctx.strokeRect(26, 26, canvas.width - 52, canvas.height - 52);
+ctx.restore();
+// --- Teal header banner (inside borders) ---
+ctx.fillStyle = "#003e4a";
+ctx.fillRect(27, 27, canvas.width - 54, 62);
+// --- SYSTRA logo text (white, on teal banner) ---
+ctx.save();
+ctx.font = "bold 28px Inter, sans-serif";
 ctx.fillStyle = "#ffffff";
 ctx.textAlign = "center";
-ctx.fillText("SYSTRA Quality Days — Certificate of Completion", canvas.width/2, 33);
-// --- Decorative line ---
-ctx.strokeStyle = '#c8a96e';
+ctx.fillText("SYSTRA", canvas.width/2, 57.4);
+ctx.font = "14px Inter, sans-serif";
+ctx.fillStyle = "rgba(255,255,255,0.7)";
+ctx.fillText("", canvas.width/2 - 160, 83);
+ctx.restore();
+// --- Certificate title (right side of banner) ---
+ctx.font = "bold 20px Inter, sans-serif";
+ctx.fillStyle = "#ffffff";
+ctx.textAlign = "center";
+ctx.fillText("Quality Days — Certificate of Completion", canvas.width/2, 80);
+// --- Gold decorative line ---
+ctx.save();
+ctx.strokeStyle = "#c8a96e";
 ctx.lineWidth = 2;
 ctx.beginPath();
-ctx.moveTo(canvas.width/4, 68);
-ctx.lineTo(canvas.width*3/4, 68);
+ctx.moveTo(60, 100);
+ctx.lineTo(canvas.width - 60, 100);
 ctx.stroke();
+ctx.restore();
 // --- Recipient info ---
-ctx.font = "20px Inter, sans-serif";
-ctx.fillStyle = "#003e4a";
-ctx.fillText(`This certifies that`, canvas.width/2, 105);
-ctx.font = "bold 28px Inter, sans-serif";
-ctx.fillStyle = "#003e4a";
-ctx.fillText(name, canvas.width/2, 148);
 ctx.font = "18px Inter, sans-serif";
-ctx.fillStyle = "#444";
-ctx.fillText(`has successfully completed the SYSTRA Quality General Quiz`, canvas.width/2, 188);
+ctx.fillStyle = "#003e4a";
+ctx.textAlign = "center";
+ctx.fillText("This certifies that", canvas.width/2, 135);
+ctx.font = "bold 30px Inter, sans-serif";
+ctx.fillStyle = "#003e4a";
+ctx.fillText(name, canvas.width/2, 180);
+// --- Underline under name ---
+ctx.save();
+ctx.strokeStyle = "#003e4a";
+ctx.lineWidth = 1;
+ctx.beginPath();
+ctx.moveTo(canvas.width/2 - 180, 188);
+ctx.lineTo(canvas.width/2 + 180, 188);
+ctx.stroke();
+ctx.restore();
 ctx.font = "16px Inter, sans-serif";
+ctx.fillStyle = "#444";
+ctx.fillText("has successfully completed the SYSTRA Quality General Quiz", canvas.width/2, 218);
+ctx.font = "15px Inter, sans-serif";
 ctx.fillStyle = "#005a6e";
-ctx.fillText(`Date: ${date}  |  Score: ${score} / ${maxScore}`, canvas.width/2, 218);
+ctx.fillText("Date: " + date + "   |   Score: " + score + " / " + maxScore, canvas.width/2, 248);
+// --- Gold star decorations ---
+ctx.save();
+ctx.font = "28px sans-serif";
+ctx.fillStyle = "#c8a96e";
+ctx.textAlign = "center";
+ctx.fillText("★", 70, 280);
+ctx.fillText("★", canvas.width - 70, 280);
+ctx.restore();
 // --- Muskat logo at bottom, below text ---
 const logoImg = new window.Image();
 logoImg.onload = function(){
@@ -485,7 +643,7 @@ logoImg.src = muskatLogoBase64;
 document.getElementById('generateCertificate').onclick=function(){
     const name = document.getElementById('userName').value || "Participant";
     const date = document.getElementById('certDate').value || new Date().toLocaleDateString();
-    drawCertificate(name,date,totalCorrect,totalQ);
+    drawCertificate(name,date,totalCorrect,scorableQ);
     document.getElementById('certificateCanvas').style.display='block';
     document.getElementById('downloadCertificate').style.display='inline-block';
     document.getElementById('downloadPdfCertificate').style.display='inline-block';
